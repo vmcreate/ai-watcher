@@ -1,0 +1,1456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>AI-Watcher — Code & DB Visualisation</title>
+<meta name="description" content="AI-Watcher: real-time function call graph, database ERD, and architecture view for your codebase."/>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+/* ── Design Tokens ─────────────────────────────────────────────────────────── */
+:root {
+  --bg:      #0d1117;
+  --bg2:     #161b22;
+  --bg3:     #21262d;
+  --border:  #30363d;
+  --text:    #e6edf3;
+  --muted:   #8b949e;
+  --accent:  #388bfd;
+  --danger:  #f85149;
+  --success: #3fb950;
+  --warn:    #d29922;
+  --db:      #a371f7;
+  --arch:    #39d353;
+}
+
+/* ── Reset & Base ──────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────────── */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 20px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  gap: 16px;
+}
+.brand { display: flex; align-items: center; gap: 12px; }
+header h1 {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: .5px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+  display: inline-block;
+  animation: pulse 2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%,100% { opacity:1; transform:scale(1); }
+  50%      { opacity:.35; transform:scale(.55); }
+}
+
+/* ── Tab Bar ─────────────────────────────────────────────────────────────────── */
+.tabs {
+  display: flex;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 3px;
+  gap: 4px;
+}
+.tab {
+  padding: 5px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--muted);
+  transition: all .2s;
+  white-space: nowrap;
+}
+.tab:hover { color: var(--text); }
+.tab.active            { background: var(--bg3); color: var(--accent);  border: 1px solid var(--border); }
+.tab.active.db-tab     { color: var(--db); }
+.tab.active.arch-tab   { color: var(--arch); }
+
+/* ── Stats Bar ─────────────────────────────────────────────────────────────── */
+.stats { display: flex; gap: 12px; }
+.stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 14px;
+  min-width: 75px;
+}
+.stat-val              { font-size: 18px; font-weight: 700; color: var(--accent); }
+.stat-val.db           { color: var(--db); }
+.stat-val.arch         { color: var(--arch); }
+.stat-lbl              { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+
+/* ── Layout ──────────────────────────────────────────────────────────────────── */
+main { display: flex; flex: 1; overflow: hidden; }
+#gc  { flex: 1; position: relative; overflow: hidden; }
+svg  { width: 100%; height: 100%; display: block; }
+
+/* ── Force-Graph Links ─────────────────────────────────────────────────────── */
+.link         { stroke: var(--accent); stroke-opacity: .6; stroke-width: 1.5px; transition: stroke .3s; }
+.link.db-link { stroke: var(--db); stroke-dasharray: 4,4; stroke-width: 2px; }
+
+/* ── Force-Graph Function Nodes (card style) ───────────────────────────────── */
+.node { cursor: pointer; }
+
+/* Pill card background */
+.fn-card-rect {
+  stroke-width: 1.5px;
+  rx: 10px;
+  transition: filter .2s;
+  filter: drop-shadow(0 3px 10px rgba(0,0,0,0.5));
+}
+.node:hover .fn-card-rect {
+  stroke-width: 2.5px;
+  filter: drop-shadow(0 0 10px currentColor) brightness(1.15);
+}
+
+/* Accent dot (left side of card) */
+.fn-card-dot { pointer-events: none; }
+
+/* Function name label */
+.fn-card-name {
+  font-size: 11px;
+  font-weight: 700;
+  fill: #e6edf3;
+  text-anchor: middle;
+  dominant-baseline: middle;
+  pointer-events: none;
+}
+
+/* File subtitle label */
+.fn-card-file {
+  font-size: 9px;
+  font-weight: 400;
+  fill: #8b949e;
+  text-anchor: middle;
+  dominant-baseline: middle;
+  pointer-events: none;
+}
+
+/* Runtime-error pulse on the card rect */
+@keyframes pulse-card-error {
+  0%   { stroke: var(--danger); stroke-width: 1.5px; filter: drop-shadow(0 0 4px #f85149); }
+  50%  { stroke: #bc8cff;       stroke-width: 3px;   filter: drop-shadow(0 0 14px #bc8cff); }
+  100% { stroke: var(--danger); stroke-width: 1.5px; filter: drop-shadow(0 0 4px #f85149); }
+}
+.node.runtime-error .fn-card-rect {
+  animation: pulse-card-error 1.5s infinite !important;
+}
+
+/* ── Sidebar ──────────────────────────────────────────────────────────────────── */
+aside {
+  width: 280px;
+  background: var(--bg2);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.sec { padding: 12px 14px; border-bottom: 1px solid var(--border); overflow-y: auto; flex: 1; }
+.sec h2 { font-size: 10px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin-bottom: 8px; }
+
+/* ── Legend ──────────────────────────────────────────────────────────────────── */
+#legend { display: flex; flex-direction: column; gap: 5px; }
+.li {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; padding: 6px 8px; border-radius: 6px;
+  cursor: pointer; user-select: none;
+  transition: background .15s, opacity .15s;
+  border: 1px solid transparent;
+}
+.li:hover { background: var(--bg3); border-color: var(--border); }
+.li.li-off { opacity: .4; }
+.li.li-off .ld { background: #30363d !important; filter: grayscale(1); }
+.li.li-off .li-name { text-decoration: line-through; color: var(--muted); }
+.li-count { margin-left: auto; font-size: 10px; background: var(--bg3); border: 1px solid var(--border); border-radius: 10px; padding: 1px 6px; color: var(--muted); }
+.ld { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+#legend-hint { font-size: 10px; color: var(--muted); margin-top: 8px; text-align: center; opacity: .7; }
+
+/* ── Tooltip ──────────────────────────────────────────────────────────────────── */
+#tip {
+  position: fixed;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-size: 12px;
+  line-height: 1.6;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .15s;
+  max-width: 340px;
+  z-index: 100;
+  box-shadow: 0 8px 24px rgba(0,0,0,.6);
+}
+#tip.v { opacity: 1; }
+#tip strong { color: var(--accent); display: block; margin-bottom: 6px; font-size: 14px; }
+#tip strong.db   { color: var(--db); border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+#tip strong.arch { color: var(--arch); border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+.field-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; max-height: 200px; overflow-y: auto; }
+.field-item { display: flex; align-items: center; justify-content: space-between; font-size: 11px; background: var(--bg2); padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border); }
+.field-name { font-weight: 600; color: var(--text); }
+.field-tag { font-size: 9px; padding: 1px 5px; border-radius: 3px; font-weight: 700; text-transform: uppercase; }
+.tag-pk { background: rgba(210,153,34,.2); color: var(--warn);  border: 1px solid var(--warn); }
+.tag-fk { background: rgba(163,113,247,.25); color: var(--db); border: 1px solid var(--db); }
+
+/* ── Alert Banners ──────────────────────────────────────────────────────────── */
+#banner {
+  display: none; position: fixed; top: 0; left: 0; right: 0;
+  background: var(--danger); color: white; text-align: center;
+  padding: 10px 16px; font-weight: 700; font-size: 13px;
+  z-index: 500; box-shadow: 0 4px 20px rgba(248,81,73,.5);
+}
+#banner-close { cursor: pointer; margin-left: 16px; opacity: .8; font-size: 16px; }
+
+#syntax-banner {
+  display: none; position: fixed; top: 0; left: 0; right: 0;
+  background: var(--warn); color: black; text-align: center;
+  padding: 10px 16px; font-weight: 700; font-size: 13px;
+  z-index: 500; box-shadow: 0 4px 20px rgba(210,153,34,.5);
+}
+
+/* ── Toggle ──────────────────────────────────────────────────────────────────── */
+.toggle-container { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.toggle-container input { cursor: pointer; }
+
+/* ── History ──────────────────────────────────────────────────────────────────── */
+#history-list { padding: 4px 0; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.history-item { padding: 8px; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; font-size: 11px; }
+.history-item.critical { border-left: 3px solid var(--danger); }
+.history-item-header { display: flex; justify-content: space-between; color: var(--muted); margin-bottom: 4px; }
+.history-item-file { font-weight: 600; color: var(--text); }
+.history-item-msg { color: var(--danger); margin-top: 4px; white-space: pre-wrap; }
+
+/* ── Animations ──────────────────────────────────────────────────────────────── */
+@keyframes shake {
+  0%, 100% { transform: translate(0,0); }
+  10%,30%,50%,70%,90% { transform: translate(-5px,0); }
+  20%,40%,60%,80%     { transform: translate(5px,0); }
+}
+.shake { animation: shake 0.6s ease-in-out; }
+
+#red-flash-overlay {
+  position: fixed; top:0; left:0; right:0; bottom:0;
+  pointer-events: none; z-index: 2000; opacity: 0;
+  box-shadow: inset 0 0 100px rgba(248,81,73,0.8);
+  transition: opacity 0.15s ease;
+}
+#red-flash-overlay.active { animation: flash-red 1.5s ease-out; }
+@keyframes flash-red { 0% { opacity:1; } 50% { opacity:0.5; } 100% { opacity:0; } }
+
+#screen-alert {
+  position: fixed; top: 30%; left: 50%;
+  transform: translate(-50%,-50%) scale(0.9);
+  background: rgba(248,81,73,0.95); color: white;
+  padding: 20px 40px; border-radius: 12px;
+  font-weight: 700; font-size: 18px;
+  box-shadow: 0 12px 36px rgba(0,0,0,0.7);
+  z-index: 2500; opacity: 0; pointer-events: none;
+  transition: all 0.3s cubic-bezier(0.175,0.885,0.32,1.275);
+  text-align: center;
+}
+#screen-alert.show { opacity: 1; transform: translate(-50%,-50%) scale(1); }
+#screen-alert-sub { font-size: 12px; font-weight: 400; margin-top: 8px; opacity: 0.9; }
+
+@keyframes pulse-error {
+  0%   { stroke: var(--danger); stroke-width: 2px; }
+  50%  { stroke: #bc8cff;       stroke-width: 6px; }
+  100% { stroke: var(--danger); stroke-width: 2px; }
+}
+.node.runtime-error .fn-card-rect { animation: pulse-card-error 1.5s infinite !important; }
+
+.pulse-danger {
+  animation: danger-pulse 1.5s infinite;
+  border-color: var(--danger) !important;
+}
+@keyframes danger-pulse {
+  0%   { box-shadow: inset 0 0 0 0 rgba(248,81,73,0.4); }
+  70%  { box-shadow: inset 0 0 10px 2px rgba(248,81,73,0.4); }
+  100% { box-shadow: inset 0 0 0 0 rgba(248,81,73,0); }
+}
+
+/* ── Scrollbars ──────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track  { background: var(--bg); }
+::-webkit-scrollbar-thumb  { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   TAB 3 — ARCHITECTURE VIEW
+   ══════════════════════════════════════════════════════════════════════════ */
+
+#arch-view {
+  display: none;
+  width: 100%;
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Toolbar inside the architecture panel */
+#arch-toolbar {
+  position: absolute;
+  top: 12px;
+  left: 16px;
+  z-index: 10;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.arch-btn {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s, border-color .15s;
+}
+.arch-btn:hover { background: var(--bg2); border-color: var(--arch); color: var(--arch); }
+
+#arch-breadcrumb {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 5px 16px;
+  font-size: 11px;
+  color: var(--muted);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .3s;
+  white-space: nowrap;
+  max-width: 80%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#arch-breadcrumb.show { opacity: 1; }
+
+/* ── Tree node shapes ────────────────────────────────────────────────────────── */
+.arch-node          { cursor: pointer; }
+.arch-node .node-bg { transition: filter .2s; }
+.arch-node:hover .node-bg { filter: brightness(1.3); }
+
+/* Layer nodes — colored rounded rectangles */
+.arch-layer-rect {
+  stroke-width: 2px;
+  filter: drop-shadow(0 4px 16px rgba(0,0,0,0.7));
+}
+.arch-layer-label {
+  font-size: 10px;
+  font-weight: 800;
+  text-anchor: middle;
+  dominant-baseline: middle;
+  pointer-events: none;
+  letter-spacing: .8px;
+  text-transform: uppercase;
+}
+
+/* File nodes — icon + external label (always visible) */
+.arch-file-icon {
+  stroke-width: 1px;
+}
+.arch-file-label {
+  font-size: 11px;
+  font-weight: 600;
+  fill: #c9d1d9;
+  text-anchor: start;
+  dominant-baseline: middle;
+  pointer-events: none;
+}
+.arch-file-count {
+  font-size: 9px;
+  fill: #8b949e;
+  text-anchor: start;
+  dominant-baseline: middle;
+  pointer-events: none;
+}
+
+/* Leaf nodes — small circles */
+.arch-leaf-circle { stroke-width: 1.5px; }
+.arch-leaf-label  {
+  font-size: 11px;
+  font-weight: 500;
+  fill: var(--text);
+  text-anchor: start;
+  dominant-baseline: middle;
+  pointer-events: none;
+}
+
+/* Tree links */
+.arch-link {
+  fill: none;
+  stroke: #30363d;
+  stroke-width: 1.5px;
+  opacity: 0.8;
+}
+
+/* Expand/collapse toggle icon */
+.arch-toggle {
+  font-size: 11px;
+  font-weight: 700;
+  text-anchor: middle;
+  dominant-baseline: middle;
+  pointer-events: none;
+}
+
+/* Hover glow on layer nodes */
+.arch-node:hover .arch-layer-rect {
+  filter: drop-shadow(0 0 12px currentColor) brightness(1.2);
+}
+.arch-node:hover .arch-file-rect {
+  stroke-width: 2px;
+}
+
+</style>
+</head>
+<body>
+
+<!-- ── Alert Banners ─────────────────────────────────────────────────────────── -->
+<div id="banner"><span id="banner-text"></span><span id="banner-close" onclick="closeBanner()">✕</span></div>
+<div id="syntax-banner"><span id="syntax-banner-text"></span></div>
+
+<!-- ── Header ────────────────────────────────────────────────────────────────── -->
+<header>
+  <div class="brand">
+    <h1><span class="dot"></span> AI-Watcher</h1>
+    <div class="tabs">
+      <div class="tab active"    id="tab-fn"   onclick="switchTab('fn')">⚡ Functions Graph</div>
+      <div class="tab db-tab"   id="tab-db"   onclick="switchTab('db')">🗄️ DB Visualisation</div>
+      <div class="tab arch-tab" id="tab-arch" onclick="switchTab('arch')">🏗️ Architecture View</div>
+    </div>
+  </div>
+  <div style="display:flex; align-items:center; gap:20px;">
+    <div class="toggle-container" id="connected-toggle">
+      <input type="checkbox" id="chk-connected" checked onchange="toggleConnectedOnly()"/>
+      <label for="chk-connected" style="cursor:pointer; user-select:none; font-size:12px; color:var(--muted); font-weight:600;">Connected only</label>
+    </div>
+    <div class="stats">
+      <div class="stat"><span class="stat-val" id="nc">0</span><span class="stat-lbl" id="lbl-n">Functions</span></div>
+      <div class="stat"><span class="stat-val" id="lc">0</span><span class="stat-lbl" id="lbl-l">Calls</span></div>
+      <div class="stat"><span class="stat-val" id="gc2">0</span><span class="stat-lbl" id="lbl-m">Modules</span></div>
+    </div>
+  </div>
+</header>
+
+<!-- ── Main Canvas ───────────────────────────────────────────────────────────── -->
+<main>
+  <div id="gc">
+    <!-- Tab 1 & 2: Force-directed graph SVG -->
+    <svg id="svg"></svg>
+
+    <!-- Tab 3: Architecture View container -->
+    <div id="arch-view">
+      <div id="arch-toolbar">
+        <button class="arch-btn" onclick="archExpandAll()">⊞ Expand All</button>
+        <button class="arch-btn" onclick="archCollapseAll()">⊟ Collapse All</button>
+        <button class="arch-btn" onclick="archResetZoom()">⊙ Reset View</button>
+      </div>
+      <svg id="arch-svg"></svg>
+      <div id="arch-breadcrumb"></div>
+    </div>
+  </div>
+
+  <!-- Sidebar (shared by all tabs) -->
+  <aside>
+    <div class="sec">
+      <h2 id="legend-title">Groups / Modules</h2>
+      <div id="legend"></div>
+    </div>
+    <div class="sec" style="border-top:1px solid var(--border); display:flex; flex-direction:column; overflow:hidden; flex:1;">
+      <h2>⚠️ Break History (<span id="history-count">0</span>)</h2>
+      <div id="history-list"></div>
+    </div>
+  </aside>
+</main>
+
+<div id="tip"></div>
+<div id="red-flash-overlay"></div>
+<div id="screen-alert">
+  <div>⚠️ LINKAGE BREAK DETECTED!</div>
+  <div id="screen-alert-sub"></div>
+</div>
+
+<script>
+/* ══════════════════════════════════════════════════════════════════════════════
+   GLOBAL PALETTE & SCALES
+   ══════════════════════════════════════════════════════════════════════════ */
+var PAL    = ['#388bfd','#3fb950','#d29922','#f78166','#bc8cff','#39d353','#ff7b72','#ffa657','#79c0ff','#56d364','#e3b341','#c9d1d9'];
+var DB_PAL = ['#a371f7','#d2a8ff','#f0883e','#79c0ff','#56d364','#ff7b72'];
+var ARCH_PAL = ['#388bfd','#a371f7','#3fb950','#d29922','#f0883e','#79c0ff','#f78166','#39d353','#bc8cff','#56d364','#e3b341','#ffa657'];
+
+var color    = d3.scaleOrdinal(PAL);
+var dbColor  = d3.scaleOrdinal(DB_PAL);
+var archColor = d3.scaleOrdinal(ARCH_PAL);
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   SHARED STATE
+   ══════════════════════════════════════════════════════════════════════════ */
+var currentTab = 'fn';
+var sim, gEl, linkSel, nodeSel;
+var curNodes = [], curLinks = [];
+var lastFullData = { nodes:[], links:[] };
+var lastDbData   = { nodes:[], links:[] };
+var lastArchData = null;
+var hiddenGroups = new Set();
+var lastSync = '';
+var bannerT;
+var showConnectedOnly = true;
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   TAB SWITCHING
+   ══════════════════════════════════════════════════════════════════════════ */
+function switchTab(t) {
+  currentTab = t;
+
+  // Tab button states
+  document.getElementById('tab-fn').className   = 'tab'          + (t==='fn'   ? ' active' : '');
+  document.getElementById('tab-db').className   = 'tab db-tab'   + (t==='db'   ? ' active' : '');
+  document.getElementById('tab-arch').className = 'tab arch-tab' + (t==='arch' ? ' active' : '');
+
+  // Show/hide the two canvas surfaces
+  document.getElementById('svg').style.display      = (t==='arch') ? 'none' : 'block';
+  document.getElementById('arch-view').style.display = (t==='arch') ? 'block' : 'none';
+
+  // Connected-only toggle only applies to force graph tabs
+  document.getElementById('connected-toggle').style.display = (t==='arch') ? 'none' : 'flex';
+
+  if (t === 'arch') {
+    // Update stat labels for architecture context
+    document.getElementById('nc').className  = 'stat-val arch';
+    document.getElementById('lc').className  = 'stat-val arch';
+    document.getElementById('lbl-n').textContent = 'Files';
+    document.getElementById('lbl-l').textContent = 'Entities';
+    document.getElementById('lbl-m').textContent = 'Layers';
+    document.getElementById('legend-title').textContent = 'Architectural Layers';
+    renderArchView();
+  } else {
+    document.getElementById('nc').className  = 'stat-val' + (t==='db' ? ' db' : '');
+    document.getElementById('lc').className  = 'stat-val' + (t==='db' ? ' db' : '');
+    document.getElementById('lbl-n').textContent = t==='fn' ? 'Functions' : 'Entities';
+    document.getElementById('lbl-l').textContent = t==='fn' ? 'Calls'     : 'Relations';
+    document.getElementById('lbl-m').textContent = 'Modules';
+    document.getElementById('legend-title').textContent = t==='fn' ? 'Groups / Modules' : 'DB Models';
+    hiddenGroups.clear();
+    if (sim) {
+      sim.force('col').radius(function(d) {
+        return t === 'db' ? 95 : Math.max(45, (d.name||'').length * 4);
+      });
+    }
+    renderGraph();
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   CONNECTED-ONLY TOGGLE
+   ══════════════════════════════════════════════════════════════════════════ */
+function toggleConnectedOnly() {
+  showConnectedOnly = document.getElementById('chk-connected').checked;
+  renderGraph();
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   SYNTAX ERROR BANNER
+   ══════════════════════════════════════════════════════════════════════════ */
+function showSyntaxError(msg) {
+  var b = document.getElementById('syntax-banner');
+  var t = document.getElementById('syntax-banner-text');
+  if (msg) { t.textContent = '⚠️ SYNTAX ERROR — ' + msg; b.style.display = 'block'; }
+  else      { b.style.display = 'none'; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   CRASH HISTORY
+   ══════════════════════════════════════════════════════════════════════════ */
+function updateCrashHistory(historyData) {
+  if (!historyData) return;
+  var listEl = document.getElementById('history-list');
+  listEl.innerHTML = '';
+  var criticalRuns = historyData.filter(function(item) {
+    return item.status && item.status.indexOf('CRITICAL') !== -1;
+  });
+  criticalRuns.forEach(function(item) {
+    var div = document.createElement('div');
+    div.className = 'history-item critical';
+    var time = '', date = '';
+    try { var d = new Date(item.timestamp); time = d.toLocaleTimeString(); date = d.toLocaleDateString(); } catch(e) {}
+    div.innerHTML =
+      '<div class="history-item-header">' +
+        '<span class="history-item-file">' + item.file + '</span>' +
+        '<span>' + date + ' ' + time + '</span>' +
+      '</div>' +
+      '<div class="history-item-msg">' + item.status + '</div>';
+    listEl.appendChild(div);
+  });
+  document.getElementById('history-count').textContent = criticalRuns.length;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   BREAK ANIMATION
+   ══════════════════════════════════════════════════════════════════════════ */
+function triggerBreakAnimation(msg) {
+  var mainEl = document.querySelector('main');
+  if (mainEl) {
+    mainEl.classList.remove('shake');
+    void mainEl.offsetWidth;
+    mainEl.classList.add('shake');
+    setTimeout(function() { mainEl.classList.remove('shake'); }, 600);
+  }
+  var flashEl = document.getElementById('red-flash-overlay');
+  if (flashEl) {
+    flashEl.classList.remove('active');
+    void flashEl.offsetWidth;
+    flashEl.classList.add('active');
+    setTimeout(function() { flashEl.classList.remove('active'); }, 1500);
+  }
+  var alertEl = document.getElementById('screen-alert');
+  var subEl   = document.getElementById('screen-alert-sub');
+  if (alertEl && subEl) {
+    subEl.textContent = msg;
+    alertEl.classList.add('show');
+    setTimeout(function() { alertEl.classList.remove('show'); }, 3500);
+  }
+  var listEl = document.getElementById('history-list');
+  if (listEl && listEl.parentElement) {
+    listEl.parentElement.classList.add('pulse-danger');
+    setTimeout(function() { listEl.parentElement.classList.remove('pulse-danger'); }, 8000);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   BLAST RADIUS HIGHLIGHT
+   ══════════════════════════════════════════════════════════════════════════ */
+function highlightBlastRadius(centerNodeId) {
+  var upstream = new Set(), downstream = new Set();
+  var queue = [centerNodeId], visited = new Set([centerNodeId]);
+  while (queue.length > 0) {
+    var curr = queue.shift();
+    curLinks.forEach(function(l) {
+      var s = l.source.id||l.source, t = l.target.id||l.target;
+      if (s===curr && !visited.has(t)) { visited.add(t); downstream.add(t); queue.push(t); }
+    });
+  }
+  queue = [centerNodeId]; visited = new Set([centerNodeId]);
+  while (queue.length > 0) {
+    var curr = queue.shift();
+    curLinks.forEach(function(l) {
+      var s = l.source.id||l.source, t = l.target.id||l.target;
+      if (t===curr && !visited.has(s)) { visited.add(s); upstream.add(s); queue.push(s); }
+    });
+  }
+  // Highlight the card rect border (fn tab) — DB tab has no blast radius
+  nodeSel.select('.fn-card-rect').transition().duration(150)
+    .attr('stroke', function(d) {
+      if (d.id===centerNodeId) return '#79c0ff';      // bright blue = focal node
+      if (upstream.has(d.id))  return 'var(--danger)'; // callers = red
+      if (downstream.has(d.id)) return 'var(--warn)';  // callees = yellow
+      return null; // keep group color
+    })
+    .attr('stroke-width', function(d) {
+      return (d.id===centerNodeId||upstream.has(d.id)||downstream.has(d.id)) ? 3 : 1.5;
+    })
+    .style('filter', function(d) {
+      if (d.id===centerNodeId) return 'drop-shadow(0 0 10px #79c0ff)';
+      if (upstream.has(d.id))  return 'drop-shadow(0 0 8px #f85149)';
+      if (downstream.has(d.id)) return 'drop-shadow(0 0 8px #d29922)';
+      return 'drop-shadow(0 3px 10px rgba(0,0,0,0.5))';
+    });
+  // Dim non-connected nodes
+  nodeSel.select('.fn-card-name').transition().duration(150)
+    .style('opacity', function(d) {
+      if (d.id===centerNodeId||upstream.has(d.id)||downstream.has(d.id)) return 1;
+      return 0.25;
+    });
+  linkSel.transition().duration(150)
+    .style('stroke-opacity', function(d) {
+      var s = d.source.id||d.source, t = d.target.id||d.target;
+      if ((s===centerNodeId||downstream.has(s)) && downstream.has(t)) return 1.0;
+      if (upstream.has(s) && (t===centerNodeId||upstream.has(t))) return 1.0;
+      return 0.06;
+    })
+    .style('stroke', function(d) {
+      var s = d.source.id||d.source, t = d.target.id||d.target;
+      if (upstream.has(s) && (t===centerNodeId||upstream.has(t))) return 'var(--danger)';
+      if ((s===centerNodeId||downstream.has(s)) && downstream.has(t)) return 'var(--warn)';
+      return currentTab==='db' ? 'var(--db)' : 'var(--accent)';
+    });
+}
+
+function resetBlastRadius() {
+  if (!nodeSel||!linkSel) return;
+  nodeSel.select('.fn-card-rect').transition().duration(150)
+    .attr('stroke', 'rgba(255,255,255,0.2)')   // revert to inline attr set during render
+    .attr('stroke-width', 1.5)
+    .style('filter', 'drop-shadow(0 3px 10px rgba(0,0,0,0.5))');
+  nodeSel.select('.fn-card-name').transition().duration(150).style('opacity', 1);
+  linkSel.transition().duration(150)
+    .style('stroke-opacity', 0.6)
+    .style('stroke', function() { return currentTab==='db' ? 'var(--db)' : 'var(--accent)'; });
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   FORCE GRAPH — INIT
+   ══════════════════════════════════════════════════════════════════════════ */
+function initSvg() {
+  var svg = d3.select('#svg');
+  svg.append('defs').append('marker')
+    .attr('id','arr').attr('viewBox','0 -5 10 10')
+    .attr('refX',72).attr('refY',0)
+    .attr('markerWidth',6).attr('markerHeight',6)
+    .attr('orient','auto')
+    .append('path').attr('d','M0,-5L10,0L0,5').attr('fill','#388bfd');
+  svg.select('defs').append('marker')
+    .attr('id','arr-db').attr('viewBox','0 -5 10 10')
+    .attr('refX',24).attr('refY',0)
+    .attr('markerWidth',7).attr('markerHeight',7)
+    .attr('orient','auto')
+    .append('path').attr('d','M0,-5L10,0L0,5').attr('fill','#a371f7');
+  gEl = svg.append('g');
+  svg.call(d3.zoom().scaleExtent([.04,8]).on('zoom', function(e) { gEl.attr('transform',e.transform); }));
+}
+
+function initSim() {
+  var r = document.getElementById('gc').getBoundingClientRect();
+  sim = d3.forceSimulation()
+    .alphaDecay(0.04)
+    .force('link', d3.forceLink().id(function(d){return d.id;}).distance(120).strength(.5))
+    .force('charge', d3.forceManyBody().strength(-200))
+    .force('center', d3.forceCenter(r.width/2, r.height/2))
+    .force('x', d3.forceX(r.width/2).strength(0.04))
+    .force('y', d3.forceY(r.height/2).strength(0.04))
+    .force('col', d3.forceCollide().radius(function(d){ return Math.max(60,(d.name||'').length*4.5+20); }))
+    .on('tick', tick);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   FORCE GRAPH — RENDER
+   ══════════════════════════════════════════════════════════════════════════ */
+var _lastNodeCount = -1;
+var _lastLinkCount = -1;
+var _lastNodeIdsStr = "";
+var _lastLinkIdsStr = "";
+
+function updateGraph(fnData, dbData) {
+  if (fnData) { lastFullData = fnData; showSyntaxError(fnData.syntaxError); }
+  if (dbData)  lastDbData = dbData;
+  if (currentTab !== 'arch') renderGraph();
+}
+
+function renderGraph() {
+  var isDb = (currentTab === 'db');
+  var activeData = isDb ? lastDbData : lastFullData;
+  var allNodes = activeData.nodes || [];
+  var allLinks = activeData.links || [];
+
+  var connectedNodeIds = new Set();
+  if (showConnectedOnly) {
+    allLinks.forEach(function(l) {
+      connectedNodeIds.add(l.source.id||l.source);
+      connectedNodeIds.add(l.target.id||l.target);
+    });
+  }
+
+  var allGroups = [...new Set(allNodes.map(function(n){return n.group;}))];
+  updateLegend(allGroups, allNodes);
+
+  var nodes = allNodes.filter(function(n) {
+    if (hiddenGroups.has(n.group)) return false;
+    if (showConnectedOnly && !connectedNodeIds.has(n.id)) return false;
+    return true;
+  });
+
+  var visIds = new Set(nodes.map(function(n){return n.id;}));
+  var links = allLinks.filter(function(l) {
+    return visIds.has(l.source.id||l.source) && visIds.has(l.target.id||l.target);
+  });
+
+  document.getElementById('nc').textContent  = nodes.length + (hiddenGroups.size>0||showConnectedOnly ? ' / '+allNodes.length : '');
+  document.getElementById('lc').textContent  = links.length + (hiddenGroups.size>0||showConnectedOnly ? ' / '+allLinks.length : '');
+  document.getElementById('gc2').textContent = allGroups.length;
+
+  // Preserve simulation positions from previous frame
+  var em = new Map(curNodes.map(function(n){return [n.id,n];}));
+  curNodes = nodes.map(function(n){ var e=em.get(n.id); return e?Object.assign(e,n):n; });
+  curLinks = links;
+
+  // ── Links ─────────────────────────────────────────────────────────────────
+  linkSel = gEl.selectAll('.link').data(curLinks, function(d){return d.id;}).join(
+    function(en) { return en.append('line').attr('class', isDb ? 'link db-link' : 'link').attr('marker-end', isDb ? 'url(#arr-db)' : 'url(#arr)'); },
+    function(u)  { return u.attr('class', isDb ? 'link db-link' : 'link').attr('marker-end', isDb ? 'url(#arr-db)' : 'url(#arr)'); },
+    function(ex) { return ex.remove(); }
+  );
+
+  // ── Nodes: enter/update/exit (D3 keyed join — no full clear needed) ────────
+  nodeSel = gEl.selectAll('.node').data(curNodes, function(d){return d.id;}).join(
+    // ENTER — only for new nodes
+    function(en) {
+      var g = en.append('g')
+        .attr('class', function(d){ return 'node' + (d.hasRuntimeError ? ' runtime-error' : '') + (isDb ? ' db-card-node' : ''); })
+        .call(drag());
+      if (isDb) {
+        var fo = g.append('foreignObject')
+          .attr('width', 160)
+          .attr('height', function(d) { return 32+((d.fields&&d.fields.length)||0)*18; })
+          .attr('x', -80)
+          .attr('y', function(d){ return -(32+((d.fields&&d.fields.length)||0)*18)/2; });
+        var divEl = fo.append('xhtml:div')
+          .attr('style','width:100%;height:100%;display:flex;flex-direction:column;overflow:hidden;border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 10px rgba(0,0,0,.5);font-family:sans-serif;background:var(--bg2);');
+        divEl.append('xhtml:div')
+          .attr('style', function(d){ return 'background:'+dbColor(d.group)+';color:white;padding:6px 10px;font-weight:bold;font-size:11px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'; })
+          .text(function(d){ return d.name; });
+        var fd = divEl.append('xhtml:div')
+          .attr('style','padding:6px;display:flex;flex-direction:column;gap:4px;flex:1;background:var(--bg3);overflow-y:auto;');
+        fd.each(function(d) {
+          var el=d3.select(this);
+          if (d.fields&&d.fields.length>0) {
+            d.fields.forEach(function(f){
+              var row=el.append('xhtml:div').attr('style','display:flex;justify-content:space-between;align-items:center;font-size:10px;line-height:1.2;');
+              row.append('xhtml:span').attr('style','color:var(--text);font-weight:'+(f.isPk||f.isFk?'bold':'normal')+';white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:110px;').text(f.name);
+              if (f.isPk) row.append('xhtml:span').attr('style','color:var(--warn);font-size:8px;font-weight:bold;background:rgba(210,153,34,0.15);border:1px solid var(--warn);padding:0 3px;border-radius:3px;flex-shrink:0;').text('PK');
+              else if (f.isFk) row.append('xhtml:span').attr('style','color:var(--db);font-size:8px;font-weight:bold;background:rgba(163,113,247,0.15);border:1px solid var(--db);padding:0 3px;border-radius:3px;flex-shrink:0;').text('FK');
+            });
+          } else {
+            el.append('xhtml:span').attr('style','color:var(--muted);font-size:9px;font-style:italic;').text('No fields');
+          }
+        });
+        g.on('mouseover', showTip).on('mousemove', moveTip).on('mouseout', hideTip);
+      } else {
+        // ── Function circle node (original style) ──────────────────────────
+        g.append('circle').attr('class', 'fn-card-rect').attr('r', 14)
+          .attr('fill', function(d){ return color(d.group); })
+          .attr('stroke', 'rgba(255,255,255,0.2)').attr('stroke-width', 1.5);
+        g.append('text').attr('class', 'fn-card-name')
+          .attr('dy', 30).attr('text-anchor', 'middle')
+          .attr('font-size', '11px').attr('font-weight', '600')
+          .attr('fill', '#e6edf3').attr('pointer-events', 'none')
+          .style('text-shadow', '0 1px 4px rgba(0,0,0,0.9)')
+          .text(function(d){ return d.name; });
+        g.on('mouseover', function(e,d){ showTip(e,d); highlightBlastRadius(d.id); })
+         .on('mousemove', moveTip)
+         .on('mouseout',  function(e,d){ hideTip(); resetBlastRadius(); });
+      }
+      return g;
+    },
+    // UPDATE — just sync class (runtime-error)
+    function(u) {
+      u.attr('class', function(d){ return 'node' + (d.hasRuntimeError ? ' runtime-error' : '') + (isDb ? ' db-card-node' : ''); });
+      return u;
+    },
+    function(ex) { return ex.remove(); }
+  );
+
+  // ── Restart simulation only when topology changes ─────────────────────────
+  var nodeIdsStr = curNodes.map(function(n){return n.id;}).sort().join(',');
+  var linkIdsStr = curLinks.map(function(l){return l.id;}).sort().join(',');
+  var changed = (nodeIdsStr !== _lastNodeIdsStr || linkIdsStr !== _lastLinkIdsStr);
+  _lastNodeIdsStr = nodeIdsStr;
+  _lastLinkIdsStr = linkIdsStr;
+  _lastNodeCount = curNodes.length;
+  _lastLinkCount = curLinks.length;
+  var newAlpha = changed ? 0.4 : 0;
+
+  var r = document.getElementById('gc').getBoundingClientRect();
+  sim.force('center', d3.forceCenter(r.width/2, r.height/2));
+  sim.force('x', d3.forceX(r.width/2).strength(0.04));
+  sim.force('y', d3.forceY(r.height/2).strength(0.04));
+  sim.nodes(curNodes);
+  sim.force('link').links(curLinks);
+  if (newAlpha > 0) sim.alpha(newAlpha).restart();
+}
+
+
+
+function tick() {
+  if (linkSel) linkSel.attr('x1',function(d){return d.source.x;}).attr('y1',function(d){return d.source.y;}).attr('x2',function(d){return d.target.x;}).attr('y2',function(d){return d.target.y;});
+  if (nodeSel) nodeSel.attr('transform',function(d){return 'translate('+d.x+','+d.y+')';});
+}
+
+function drag() {
+  return d3.drag()
+    .on('start', function(e,d){ if(!e.active) sim.alphaTarget(.3).restart(); d.fx=d.x; d.fy=d.y; })
+    .on('drag',  function(e,d){ d.fx=e.x; d.fy=e.y; })
+    .on('end',   function(e,d){ if(!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; });
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   TOOLTIP
+   ══════════════════════════════════════════════════════════════════════════ */
+var tip = document.getElementById('tip');
+
+function showTip(e, d) {
+  var isDb   = (currentTab==='db');
+  var isArch = (currentTab==='arch');
+  var html = '';
+  if (isDb) {
+    html += '<strong class="db">🗄️ Entity: '+d.name+'</strong>';
+    html += '<span>File: <b>'+d.file+'</b></span><br>';
+    html += '<span>Type: <b style="color:var(--db)">'+(d.type||'Table')+'</b></span>';
+    if (d.fields && d.fields.length > 0) {
+      html += '<div class="field-list">';
+      d.fields.forEach(function(f) {
+        html += '<div class="field-item"><span class="field-name">'+f.name+'</span>';
+        if (f.isPk) html += '<span class="field-tag tag-pk">PK</span>';
+        else if (f.isFk) html += '<span class="field-tag tag-fk">FK / TENANT</span>';
+        html += '</div>';
+      });
+      html += '</div>';
+    }
+  } else {
+    html += '<strong>'+d.name+'</strong>';
+    html += '<span>File: <b>'+d.file+'</b> (Line '+d.line+')</span><br>';
+    html += '<span>Module: <b style="color:var(--warn)">'+d.group+'</b></span>';
+    if (d.hasRuntimeError && d.runtimeError) {
+      html += '<br><span style="color:var(--danger);font-weight:bold;display:block;margin-top:8px;">💥 RUNTIME ERROR:</span>';
+      html += '<span style="color:var(--danger);font-size:10px;font-family:monospace;display:block;background:rgba(248,81,73,0.1);border:1px solid rgba(248,81,73,0.2);padding:6px;border-radius:4px;margin-top:4px;max-height:100px;overflow-y:auto;white-space:pre-wrap;">'+d.runtimeError+'</span>';
+    }
+  }
+  tip.innerHTML = html;
+  tip.classList.add('v');
+}
+function moveTip(e) { tip.style.left=(e.clientX+14)+'px'; tip.style.top=(e.clientY+14)+'px'; }
+function hideTip()  { tip.classList.remove('v'); }
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   LEGEND
+   ══════════════════════════════════════════════════════════════════════════ */
+function updateLegend(groups, allNodes) {
+  var isDb   = (currentTab==='db');
+  var isArch = (currentTab==='arch');
+  var leg = document.getElementById('legend');
+  leg.innerHTML = '';
+  groups.slice().sort().forEach(function(g) {
+    var isOff = hiddenGroups.has(g);
+    var cnt   = (allNodes||[]).filter(function(n){return n.group===g;}).length;
+    var d = document.createElement('div');
+    d.className = 'li' + (isOff ? ' li-off' : '');
+    d.title = (isOff?'Click to show':'Click to hide') + ' group: ' + g;
+    var col = isOff ? '#30363d' : (isArch ? archColor(g) : (isDb ? dbColor(g) : color(g)));
+    d.innerHTML =
+      '<span class="ld" style="background:'+col+'"></span>' +
+      '<span class="li-name">'+g+'</span>' +
+      '<span class="li-count">'+cnt+'</span>' +
+      '<span class="li-eye">'+(isOff?'👁️':'')+'</span>';
+    if (!isArch) {
+      d.addEventListener('click', function() {
+        if (hiddenGroups.has(g)) hiddenGroups.delete(g); else hiddenGroups.add(g);
+        renderGraph();
+      });
+    }
+    leg.appendChild(d);
+  });
+  var hint = document.createElement('div');
+  hint.id = 'legend-hint';
+  hint.innerHTML = isArch 
+    ? '🏗️ Architectural layers of the project' 
+    : (isDb 
+        ? '💡 Klikni model za sakrivanje<br><span style="margin-top:6px; display:inline-block; opacity:0.85; line-height:1.4;">🔑 <b>PK</b> = Primary Key (Primarni ključ)<br>🔗 <b>FK</b> = Foreign Key (Strani ključ)</span>' 
+        : '💡 Click group to toggle visibility');
+  leg.appendChild(hint);
+
+  if (isArch) {
+    var guide = document.createElement('div');
+    guide.style.marginTop = '20px';
+    guide.style.borderTop = '1px solid #21262d';
+    guide.style.paddingTop = '15px';
+    guide.innerHTML = 
+      '<div style="font-size:11px; text-transform:uppercase; letter-spacing:0.8px; color:#8b949e; margin-bottom:10px; font-weight:bold;">🎨 Visual Guide</div>' +
+      '<div style="display:flex; align-items:center; margin-bottom:8px; font-size:11px;">' +
+        '<span style="display:inline-block; width:16px; height:10px; border-radius:3px; border:1px solid #388bfd; background:rgba(56,139,253,0.15); margin-right:8px;"></span>' +
+        '<span><b>Functions:</b> Blue pill</span>' +
+      '</div>' +
+      '<div style="display:flex; align-items:center; margin-bottom:12px; font-size:11px;">' +
+        '<span style="display:inline-block; width:16px; height:10px; border-radius:3px; border:1px solid #a371f7; background:rgba(163,113,247,0.15); margin-right:8px;"></span>' +
+        '<span><b>DB Tables / Models:</b> Purple pill</span>' +
+      '</div>' +
+      '<div style="font-size:11px; color:#c9d1d9; line-height:1.5;">' +
+        '<div>🔗 <b>in / out:</b> Incoming / outgoing file dependencies</div>' +
+        '<div style="margin-top:4px;">⚡ / 🔥 <b>changes:</b> Recent code modifications (history)</div>' +
+        '<div style="margin-top:4px; opacity:0.8;">💡 Click <b style="border:1px solid #555; border-radius:50%; padding:0 3px; display:inline-block; line-height:10px; font-size:9px;">+</b> / <b style="border:1px solid #555; border-radius:50%; padding:0 4px; display:inline-block; line-height:10px; font-size:9px;">−</b> to expand or collapse tree branches</div>' +
+      '</div>';
+    leg.appendChild(guide);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   BANNERS
+   ══════════════════════════════════════════════════════════════════════════ */
+function showBanner(msg) {
+  var b = document.getElementById('banner');
+  document.getElementById('banner-text').textContent = '⚠️  CRITICAL LINKAGE BROKEN — ' + msg;
+  b.style.display = 'block';
+  clearTimeout(bannerT);
+  bannerT = setTimeout(closeBanner, 10000);
+}
+function closeBanner() { document.getElementById('banner').style.display = 'none'; clearTimeout(bannerT); }
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   TAB 3 — ARCHITECTURE VIEW D3 TREE
+   ══════════════════════════════════════════════════════════════════════════ */
+
+var archSvgSel, archGEl, archZoom;
+var archRoot = null;         // d3.hierarchy root (mutated for collapse/expand)
+var archData = null;         // raw JSON from /architecture-data
+
+// Node dimensions
+var LAYER_W = 120, LAYER_H = 26;
+var FILE_W  = 140, FILE_H  = 30;
+var LEAF_R  = 6;
+var NODE_SEP_Y = 28;   // vertical spacing between siblings (d3.tree nodeSize)
+var LEVEL_SEP  = 220;  // horizontal spacing between depth levels
+
+/**
+ * Initialises the Architecture View SVG and zoom behaviour.
+ * Called once on first render.
+ */
+function initArchSvg() {
+  var container = document.getElementById('arch-view');
+  archSvgSel = d3.select('#arch-svg');
+  archSvgSel.selectAll('*').remove();
+
+  archZoom = d3.zoom().scaleExtent([0.05, 3]).on('zoom', function(e) {
+    archGEl.attr('transform', e.transform);
+  });
+  archSvgSel.call(archZoom);
+  archGEl = archSvgSel.append('g');
+}
+
+/** Collapses all children of a d3-hierarchy node (stores them in _children). */
+function collapseNode(d) {
+  if (d.children) {
+    d._children = d.children;
+    d._children.forEach(collapseNode);
+    d.children = null;
+  }
+}
+
+/** Expands one level of a collapsed node. */
+function expandNode(d) {
+  if (d._children) {
+    d.children = d._children;
+    d._children = null;
+  }
+}
+
+/** Recursively expand all nodes in the tree. */
+function expandAll(d) {
+  if (d._children) { d.children = d._children; d._children = null; }
+  if (d.children) d.children.forEach(expandAll);
+}
+
+/** Recursively collapse all nodes below root. */
+function collapseAll(d) {
+  if (d.children) {
+    d.children.forEach(collapseAll);
+    d._children = d.children;
+    d.children = null;
+  }
+}
+
+function archExpandAll()    { if (!archRoot) return; expandAll(archRoot); updateArchTree(); }
+function archCollapseAll()  {
+  if (!archRoot) return;
+  if (archRoot.children) archRoot.children.forEach(collapseAll);
+  updateArchTree();
+}
+function archResetZoom() {
+  if (!archSvgSel) return;
+  archSvgSel.transition().duration(500).call(archZoom.transform, d3.zoomIdentity.translate(60,20).scale(1));
+}
+
+/**
+ * Full render/update cycle for the architecture tree.
+ * Uses a horizontal d3.tree layout (root on the left, leaves on the right).
+ */
+function updateArchTree() {
+  if (!archRoot || !archGEl) return;
+
+  // Full clear before every redraw — guarantees labels always render
+  archGEl.selectAll('*').remove();
+
+  // ── Compute layout ────────────────────────────────────────────────────────
+  var treeLayout = d3.tree()
+    .nodeSize([NODE_SEP_Y, LEVEL_SEP])
+    .separation(function(a, b) {
+      // Give leaves more breathing room next to file nodes
+      return (a.parent === b.parent) ? 1 : 1.4;
+    });
+
+  treeLayout(archRoot);
+
+  var nodes = archRoot.descendants();
+  var links = archRoot.links();
+
+  // ── Links ──────────────────────────────────────────────────────────────────
+  var linkSel = archGEl.selectAll('.arch-link').data(links, function(d) {
+    return d.target.data.path || d.target.data.name;
+  });
+
+  linkSel.join(
+    function(enter) {
+      return enter.append('path').attr('class','arch-link')
+        .attr('d', function(d) {
+          // Elbow connector (horizontal tree)
+          return 'M'+d.source.y+','+d.source.x
+               + 'C'+((d.source.y+d.target.y)/2)+','+d.source.x
+               + ' '+((d.source.y+d.target.y)/2)+','+d.target.x
+               + ' '+d.target.y+','+d.target.x;
+        })
+        .style('opacity', 0)
+        .call(function(s) { s.transition().duration(300).style('opacity',1); });
+    },
+    function(update) {
+      return update.transition().duration(300).attr('d', function(d) {
+        return 'M'+d.source.y+','+d.source.x
+             + 'C'+((d.source.y+d.target.y)/2)+','+d.source.x
+             + ' '+((d.source.y+d.target.y)/2)+','+d.target.x
+             + ' '+d.target.y+','+d.target.x;
+      });
+    },
+    function(exit) { return exit.transition().duration(200).style('opacity',0).remove(); }
+  );
+
+  // ── Nodes ─────────────────────────────────────────────────────────────────
+  var nodeSel = archGEl.selectAll('.arch-node').data(nodes, function(d) {
+    return d.data.path || d.data.name;
+  });
+
+  var nodeEnter = nodeSel.enter().append('g')
+    .attr('class','arch-node')
+    .attr('transform', function(d) { return 'translate('+d.y+','+d.x+')'; })
+    .style('opacity', 0)
+    .on('click', function(e, d) { onArchNodeClick(e, d); })
+    .on('mouseover', function(e, d) { onArchNodeHover(e, d, true); })
+    .on('mouseout',  function(e, d) { onArchNodeHover(e, d, false); });
+
+  // Merge for updates
+  var nodeAll = nodeEnter.merge(nodeSel);
+  nodeAll.transition().duration(300)
+    .attr('transform', function(d) { return 'translate('+d.y+','+d.x+')'; })
+    .style('opacity', 1);
+
+  // ── Draw different shapes by depth ────────────────────────────────────────
+  nodeEnter.each(function(d) {
+    var el = d3.select(this);
+    var type = d.data.type;
+
+    if (type === 'root') {
+      // Root — simple diamond / circle marker
+      el.append('circle').attr('r', 8)
+        .attr('fill', '#30363d').attr('stroke', 'var(--border)').attr('stroke-width',2);
+      el.append('text').attr('x', 14).attr('dy','0.35em')
+        .attr('font-size','11px').attr('fill','var(--muted)').attr('font-weight','600')
+        .text(d.data.name);
+    }
+    else if (type === 'layer') {
+      var col = archColor(d.data.layer || d.data.name);
+      // Semi-transparent colored fill so the node stands out from the dark bg
+      var fillColor = col.replace(')', ', 0.15)').replace('rgb(','rgba(');
+      el.append('rect').attr('class','arch-layer-rect')
+        .attr('width', LAYER_W).attr('height', LAYER_H)
+        .attr('x', -LAYER_W/2).attr('y', -LAYER_H/2)
+        .attr('rx', 6)
+        .attr('fill', '#1c2128')        /* slightly lighter than --bg */
+        .attr('stroke', col)
+        .attr('stroke-width', 2.0);
+      // Colored left accent bar
+      el.append('rect')
+        .attr('width', 3).attr('height', LAYER_H - 8)
+        .attr('x', -LAYER_W/2 + 0).attr('y', -LAYER_H/2 + 4)
+        .attr('rx', 1.5)
+        .attr('fill', col);
+      el.append('text').attr('class','arch-layer-label')
+        .attr('x', 2)   /* shift right slightly to balance the left accent bar */
+        .attr('fill', col)
+        .text(function() {
+          var lbl = d.data.layer || d.data.name;
+          var hasKids = d.children || d._children;
+          var cnt = hasKids ? ((d.children||d._children).length) : 0;
+          return lbl + (cnt > 0 ? ' (' + cnt + ')' : '');
+        });
+    }
+    else if (type === 'file') {
+      var parentCol = d.parent ? archColor(d.parent.data.layer || d.parent.data.name) : '#555';
+      var hasKids   = d.children || d._children;
+      var kidCount  = hasKids ? (d.children || d._children).length : 0;
+
+      var startX = hasKids ? 14 : 4;
+      var iw = 10, ih = 13;
+
+      // Small file-icon: shifted after the line end
+      el.append('rect').attr('class', 'arch-file-icon')
+        .attr('x', startX).attr('y', -ih/2)
+        .attr('width', iw).attr('height', ih)
+        .attr('rx', 2)
+        .attr('fill', '#161b22')
+        .attr('stroke', parentCol)
+        .attr('stroke-width', 1.5);
+      // Tiny folded-corner accent line
+      el.append('line')
+        .attr('x1', startX + iw - 4).attr('y1', -ih/2)
+        .attr('x2', startX + iw).attr('y2', -ih/2 + 4)
+        .attr('stroke', parentCol).attr('stroke-width', 1).attr('pointer-events','none');
+
+      // Filename text — always visible, shifted after the icon
+      el.append('text').attr('class', 'arch-file-label')
+        .attr('x', startX + iw + 7).attr('dy', '0.35em')
+        .attr('fill', parentCol)
+        .text(d.data.name);
+
+      // Rich metadata subtitle (always visible, English format)
+      var funcCount = 0;
+      var entityCount = 0;
+      var kids = d.children || d._children || [];
+      kids.forEach(function(c) {
+        if (c.data.type === 'function') {
+          funcCount++;
+        } else {
+          entityCount++;
+        }
+      });
+
+      var details = [];
+      
+      // 1. Entity Breakdown
+      var fnLabel = funcCount > 0 ? (funcCount + ' fn' + (funcCount === 1 ? '' : 's')) : '';
+      var dbLabel = entityCount > 0 ? (entityCount + ' db' + (entityCount === 1 ? '' : 's')) : '';
+      if (fnLabel || dbLabel) {
+        details.push([fnLabel, dbLabel].filter(Boolean).join(' & '));
+      }
+
+      // 2. Dependencies (incoming / outgoing)
+      var inc = d.data.incoming || 0;
+      var out = d.data.outgoing || 0;
+      details.push('🔗 ' + inc + ' in / ' + out + ' out');
+
+      // 3. Changes from .ai_context.json
+      var changes = d.data.changes || 0;
+      if (changes > 0) {
+        var actIcon = changes >= 5 ? '🔥' : '⚡';
+        details.push(actIcon + ' ' + changes + ' change' + (changes === 1 ? '' : 's'));
+      }
+
+      el.append('text').attr('class', 'arch-file-count')
+        .attr('x', startX + iw + 7).attr('dy', '1.6em')
+        .text(details.join('  •  '));
+
+      // Expand/collapse toggle — centered exactly at (0, 0)
+      if (hasKids) {
+        el.append('circle').attr('class', 'arch-toggle-btn')
+          .attr('cx', 0).attr('cy', 0)
+          .attr('r', 6)
+          .attr('fill', '#21262d')
+          .attr('stroke', parentCol)
+          .attr('stroke-width', 1.5);
+        el.append('text').attr('class', 'arch-toggle')
+          .attr('fill', parentCol)
+          .attr('x', 0).attr('y', 0).attr('dy', '0.05em')
+          .text(d.children ? '−' : '+');
+      } else {
+        // Small leaf anchor dot to make the line end cleanly
+        el.append('circle')
+          .attr('cx', 0).attr('cy', 0)
+          .attr('r', 2.5)
+          .attr('fill', parentCol);
+      }
+    }
+    else {
+      // Leaf: function or DB entity
+      var leafCol = type === 'function' ? '#388bfd' : '#a371f7';
+      var leafBg  = type === 'function' ? 'rgba(56,139,253,0.15)' : 'rgba(163,113,247,0.15)';
+      // Small pill background for the label
+      var labelText = d.data.name || '';
+      var pillW = Math.min(labelText.length * 6.8 + 20, 180);
+      el.append('rect')
+        .attr('x', LEAF_R + 4).attr('y', -9)
+        .attr('width', pillW).attr('height', 18)
+        .attr('rx', 4)
+        .attr('fill', leafBg)
+        .attr('stroke', leafCol)
+        .attr('stroke-width', 0.8);
+      el.append('circle').attr('class','arch-leaf-circle')
+        .attr('r', LEAF_R)
+        .attr('fill', leafCol)
+        .attr('stroke', '#0d1117')
+        .attr('stroke-width', 1.5);
+      el.append('text').attr('class','arch-leaf-label')
+        .attr('x', LEAF_R + 10).attr('dy','0.35em')
+        .attr('fill', '#e6edf3')
+        .text(labelText);
+    }
+  });
+
+  // Update toggle sign on file nodes after expand/collapse
+  nodeAll.each(function(d) {
+    if (d.data.type === 'file') {
+      // Update expand/collapse toggle text
+      d3.select(this).select('.arch-toggle').text(d.children ? '−' : (d._children ? '+' : ''));
+    }
+  });
+
+  nodeSel.exit().transition().duration(200).style('opacity',0).remove();
+
+  // ── Update sidebar legend with layer groups ────────────────────────────────
+  var layers = (archRoot.children || []).map(function(c) { return c.data.layer || c.data.name; });
+  var fileCount = 0, entityCount = 0;
+  (archRoot.descendants()).forEach(function(n) {
+    if (n.data.type==='file') fileCount++;
+    if (n.data.type==='function'||n.data.type==='entity'||
+        n.data.type==='SQL Table'||n.data.type==='Prisma Model'||n.data.type==='Code Model') entityCount++;
+  });
+  document.getElementById('nc').textContent  = fileCount;
+  document.getElementById('lc').textContent  = entityCount;
+  document.getElementById('gc2').textContent = layers.length;
+
+  var layerNodes = archRoot.children || [];
+  updateLegend(layers, layerNodes.map(function(l){return {group: l.data.layer||l.data.name};}));
+}
+
+/** Handles click — toggle expand/collapse for layer and file nodes. */
+function onArchNodeClick(e, d) {
+  e.stopPropagation();
+  if (d.data.type === 'root') return;
+
+  if (d.children) {
+    collapseNode(d);
+  } else if (d._children) {
+    expandNode(d);
+  }
+  updateArchTree();
+}
+
+/** Shows/hides breadcrumb on hover. */
+function onArchNodeHover(e, d, isOver) {
+  var bc = document.getElementById('arch-breadcrumb');
+  if (!isOver) { bc.classList.remove('show'); return; }
+
+  // Build path from root → node
+  var parts = [];
+  var cur = d;
+  while (cur) { parts.unshift(cur.data.name); cur = cur.parent; }
+  bc.textContent = parts.join(' › ');
+  bc.classList.add('show');
+}
+
+/**
+ * Fetches /architecture-data and triggers the full architecture tree render.
+ */
+async function renderArchView() {
+  try {
+    var res  = await fetch('/architecture-data');
+    archData = await res.json();
+    archRoot = d3.hierarchy(archData);
+
+    if (!archGEl) initArchSvg();
+
+    // Start with layer nodes expanded, files collapsed
+    archRoot.each(function(d) {
+      if (d.data.type === 'file' && d.children) {
+        d._children = d.children;
+        d.children  = null;
+      }
+    });
+
+    updateArchTree();
+
+    // Auto-fit the tree into the available canvas
+    var container = document.getElementById('arch-view');
+    var w = container.offsetWidth;
+    var h = container.offsetHeight;
+    archSvgSel.call(archZoom.transform, d3.zoomIdentity.translate(w * 0.08, h * 0.5).scale(0.85));
+  } catch (err) {
+    console.warn('[AI-Watcher] Could not fetch architecture data:', err);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   POLLING
+   ══════════════════════════════════════════════════════════════════════════ */
+async function poll() {
+  try {
+    var resFn = await fetch('/data');
+    var resDb = await fetch('/db-data');
+    updateGraph(await resFn.json(), await resDb.json());
+  } catch(e) {}
+
+  // If we're on the arch tab, refresh it too
+  if (currentTab === 'arch') {
+    try {
+      var resArch = await fetch('/architecture-data');
+      var newArch  = await resArch.json();
+      // Only re-render if data actually changed (simple stringify diff)
+      var newStr = JSON.stringify(newArch);
+      if (newStr !== JSON.stringify(archData)) {
+        archData = newArch;
+        archRoot = d3.hierarchy(archData);
+        archRoot.each(function(d) {
+          if (d.data.type === 'file' && d.children) { d._children = d.children; d.children = null; }
+        });
+        updateArchTree();
+      }
+    } catch(e) {}
+  }
+
+  try {
+    var cr = await fetch('/.ai_context', { cache: 'no-store' });
+    if (cr.ok) {
+      var ctx = await cr.json();
+      if (ctx.sync_timestamp && ctx.sync_timestamp !== lastSync) {
+        var isInitial = (lastSync === '');
+        lastSync = ctx.sync_timestamp;
+        if (ctx.change_history) updateCrashHistory(ctx.change_history);
+        if (ctx.broken_link) {
+          showBanner(ctx.broken_link);
+          if (!isInitial) triggerBreakAnimation(ctx.broken_link);
+        }
+      }
+    }
+  } catch(e) {}
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   BOOT
+   ══════════════════════════════════════════════════════════════════════════ */
+(function init() {
+  initSvg();
+  initSim();
+  poll();
+  setInterval(poll, 2000);
+})();
+</script>
+</body>
+</html>
