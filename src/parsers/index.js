@@ -173,7 +173,7 @@ function parseCodeModels(content, relativePath, group) {
     const trimmed = lineText.trim();
     let m;
 
-    if ((m = trimmed.match(/(?:class|struct)\s+([a-zA-Z0-9_]+)/))) {
+    if ((m = trimmed.match(/(?:class|struct|interface)\s+([a-zA-Z0-9_]+)/))) {
       // Persist the previous class if it had fields
       if (currentClass && classFields.length > 0) {
         result.set(currentClass, {
@@ -183,7 +183,8 @@ function parseCodeModels(content, relativePath, group) {
       }
       const candidate = m[1];
       const isModel = MODEL_KEYWORDS.some(k => candidate.toLowerCase().includes(k.toLowerCase()))
-                   || /Model|Entity|Table/i.test(trimmed);
+                   || /Model|Entity|Table/i.test(trimmed)
+                   || /model|entity|table|schema/i.test(relativePath);
       if (isModel) {
         currentClass = candidate;
         classFields  = [];
@@ -202,7 +203,7 @@ function parseCodeModels(content, relativePath, group) {
       // 2. If we are at depth 1 (directly inside the class body) and not opening a block
       const hasOpenBrace = trimmed.includes('{');
       if (braceDepth === 1 && !hasOpenBrace) {
-        if ((m = trimmed.match(/^(?:public|private|protected|final|late|readonly)?\s*(?:[a-zA-Z0-9_<>?]+[\s*]+)?([a-zA-Z0-9_]+)\s*[:=;]/))) {
+        if ((m = trimmed.match(/^(?:public|private|protected|final|late|readonly)?\s*(?:[a-zA-Z0-9_<>?]+[\s*]+)?([a-zA-Z0-9_]+)\s*\??\s*[:=;]/))) {
           const fname = m[1];
           if (!['constructor','function','get','set'].includes(fname) && fname.length > 1) {
             const isPk = fname.toLowerCase() === 'id';

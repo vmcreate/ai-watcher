@@ -571,6 +571,7 @@ function switchTab(t) {
       sim.force('col').radius(function(d) {
         return t === 'db' ? 95 : Math.max(45, (d.name||'').length * 4);
       });
+      sim.alpha(0.3).restart();
     }
     renderGraph();
   }
@@ -808,6 +809,44 @@ function renderGraph() {
   curNodes = nodes.map(function(n){ var e=em.get(n.id); return e?Object.assign(e,n):n; });
   curLinks = links;
 
+  if (isDb) {
+    var r = document.getElementById('gc').getBoundingClientRect();
+    var colsCount = Math.max(1, Math.floor(r.width / 280));
+    var colWidth = 260; 
+    var startX = (r.width - (colsCount - 1) * colWidth) / 2;
+    var startY = 60;
+    var colY = new Array(colsCount).fill(startY);
+    
+    curNodes.forEach(function(n) {
+      var minColIdx = 0;
+      var minVal = colY[0];
+      for (var i = 1; i < colsCount; i++) {
+        if (colY[i] < minVal) {
+          minVal = colY[i];
+          minColIdx = i;
+        }
+      }
+      
+      var cardHeight = 32 + ((n.fields && n.fields.length) || 0) * 18;
+      n.x = startX + minColIdx * colWidth;
+      n.y = colY[minColIdx] + cardHeight / 2;
+      n.fx = n.x;
+      n.fy = n.y;
+      n.isDbGrid = true;
+      
+      colY[minColIdx] += cardHeight + 40;
+    });
+  } else {
+    // Release fixed positions for other tabs
+    curNodes.forEach(function(n) {
+      if (n.isDbGrid) {
+        n.fx = null;
+        n.fy = null;
+        delete n.isDbGrid;
+      }
+    });
+  }
+
   // ── Links ─────────────────────────────────────────────────────────────────
   linkSel = gEl.selectAll('.link').data(curLinks, function(d){return d.id;}).join(
     function(en) { return en.append('line').attr('class', isDb ? 'link db-link' : 'link').attr('marker-end', isDb ? 'url(#arr-db)' : 'url(#arr)'); },
@@ -904,7 +943,13 @@ function drag() {
   return d3.drag()
     .on('start', function(e,d){ if(!e.active) sim.alphaTarget(.3).restart(); d.fx=d.x; d.fy=d.y; })
     .on('drag',  function(e,d){ d.fx=e.x; d.fy=e.y; })
-    .on('end',   function(e,d){ if(!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; });
+    .on('end',   function(e,d){
+      if(!e.active) sim.alphaTarget(0);
+      d.fx=null; d.fy=null;
+      if (currentTab === 'db') {
+        renderGraph();
+      }
+    });
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
@@ -978,7 +1023,7 @@ function updateLegend(groups, allNodes) {
   hint.innerHTML = isArch 
     ? '🏗️ Architectural layers of the project' 
     : (isDb 
-        ? '💡 Klikni model za sakrivanje<br><span style="margin-top:6px; display:inline-block; opacity:0.85; line-height:1.4;">🔑 <b>PK</b> = Primary Key (Primarni ključ)<br>🔗 <b>FK</b> = Foreign Key (Strani ključ)</span>' 
+        ? '💡 Click model to hide<br><span style="margin-top:6px; display:inline-block; opacity:0.85; line-height:1.4;">🔑 <b>PK</b> = Primary Key<br>🔗 <b>FK</b> = Foreign Key</span>' 
         : '💡 Click group to toggle visibility');
   leg.appendChild(hint);
 

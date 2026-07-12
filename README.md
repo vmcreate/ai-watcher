@@ -60,9 +60,20 @@ Once started, AI-Watcher will:
 
 AI-Watcher is language-agnostic and supports parsing:
 - **Languages:** JavaScript, TypeScript, Dart, Python, Go, Rust, Java, C#, C++, Swift, Kotlin, and more.
-- **DB Schemas:** Prisma schema (`.prisma`) and SQL scripts (`.sql`).
+- **DB Schemas:** Prisma schema (`.prisma`), SQL scripts (`.sql`), and **TypeScript/Angular model interfaces** (`.model.ts`).
 
 It automatically generates a `.ai_context.json` file in your project root containing structured data for AI agents to easily read the codebase state.
+
+---
+
+## 📝 Changelog
+
+### v3.0.3
+- **Angular & TypeScript Model Support**: Auto-extracts database models from TypeScript interfaces (`export interface`) and handles optional properties (`?:`) and path-based model file heuristics.
+- **Responsive Masonry Grid Layout (DB Tab)**: Arranges database tables in a neat column-based masonry grid layout that dynamically recalculates on window resize, resolving card overlapping.
+- **Tab Switch Transition Fix**: Wakes up D3 physics immediately when switching between DB Visualisation and Functions Graph tabs.
+- **Improved Drag-Release Snapping**: Instantly snaps dragged database cards back into their correct column grid position upon drag release.
+- **Clean English UI**: Fully localized the entire dashboard interface to English.
 
 ---
 

@@ -1,6 +1,6 @@
 {
   "name": "@vmcreate/ai-watcher",
-  "version": "3.0.2",
+  "version": "3.0.3",
   "description": "Local memory keeper and visualization tool for AI developer agents. Zero-config, language-agnostic.",
   "main": "src/main.js",
   "bin": {
